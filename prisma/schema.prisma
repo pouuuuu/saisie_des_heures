@@ -1,0 +1,208 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============== CLIENTS (Multi-tenancy) ===============
+model Client {
+  id                  String  @id @default(cuid())
+  name                String
+  slug                String  @unique
+
+  // HFSQL Connection info
+  hfsql_server        String
+  hfsql_port          Int     @default(4900)
+  hfsql_db            String
+  hfsql_user          String
+  hfsql_password      String  @db.Text // Encrypted in production
+
+  // Agent communication
+  agent_token         String  @unique
+  agent_last_sync     DateTime?
+
+  // Settings
+  active              Boolean @default(true)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  // Relations
+  users               User[]
+  chantiers           Chantier[]
+  heures              Heure[]
+  audit_logs          AuditLog[]
+
+  @@index([agent_token])
+}
+
+// ============== USERS ===============
+enum UserRole {
+  WORKER              // Ouvrier - saisie heures seulement
+  TEAM_LEAD           // Chef de chantier - valide équipe
+  HR                  // RH - accès complet + rapports
+  ADMIN               // Admin - config clients
+}
+
+model User {
+  id                  String  @id @default(cuid())
+  email               String
+  password_hash       String
+  name                String
+  role                UserRole @default(WORKER)
+
+  // Multi-tenancy
+  client_id           String
+  client              Client  @relation(fields: [client_id], references: [id], onDelete: Cascade)
+
+  // Team lead info
+  team_id             String?           // ID de l'équipe qu'il supervise
+
+  // HFSQL sync
+  hfsql_id            Int?
+
+  // Account status
+  active              Boolean @default(true)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  // Relations
+  heures              Heure[] @relation("user_heures")
+  created_heures      Heure[] @relation("created_by_user")
+  refresh_tokens      RefreshToken[]
+  audit_logs          AuditLog[]
+
+  @@unique([client_id, email])
+  @@index([client_id])
+  @@index([email])
+}
+
+// ============== CHANTIERS (Projects/Sites) ===============
+model Chantier {
+  id                  String  @id @default(cuid())
+
+  // Multi-tenancy
+  client_id           String
+  client              Client  @relation(fields: [client_id], references: [id], onDelete: Cascade)
+
+  // Project info
+  name                String
+  code                String              // Code Codial
+  description         String?
+
+  // HFSQL sync
+  hfsql_id            Int?
+  synced_from_hfsql   Boolean @default(false)
+
+  // Status
+  active              Boolean @default(true)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  // Relations
+  heures              Heure[]
+
+  @@unique([client_id, code])
+  @@index([client_id])
+  @@index([active])
+}
+
+// ============== HEURES (Time entries) ===============
+enum HeureType {
+  MO                  // Main d'œuvre (travail)
+  FRAIS               // #FRAIS# (déplacement/frais)
+}
+
+enum HeureStatus {
+  DRAFT               // Brouillon (pas sauvegardé)
+  PENDING             // En attente de validation
+  APPROVED            // Validé
+  REJECTED            // Rejeté
+  SYNCED              // Synchronisé vers HFSQL
+}
+
+model Heure {
+  id                  String  @id @default(cuid())
+
+  // Multi-tenancy
+  client_id           String
+  client              Client  @relation(fields: [client_id], references: [id], onDelete: Cascade)
+
+  // User & Project
+  user_id             String
+  user                User    @relation("user_heures", fields: [user_id], references: [id], onDelete: Cascade)
+  chantier_id         String
+  chantier            Chantier @relation(fields: [chantier_id], references: [id], onDelete: Cascade)
+
+  // Data
+  date                DateTime @db.Date
+  hours               Decimal
+  type                HeureType @default(MO)
+  status              HeureStatus @default(PENDING)
+  notes               String?
+
+  // HFSQL sync
+  hfsql_id            Int?
+  synced_to_hfsql     Boolean @default(false)
+  synced_at           DateTime?
+
+  // Audit
+  created_by          String?
+  created_by_user     User?   @relation("created_by_user", fields: [created_by], references: [id])
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  @@unique([user_id, chantier_id, date])
+  @@index([user_id])
+  @@index([client_id])
+  @@index([chantier_id])
+  @@index([date])
+  @@index([status])
+  @@index([synced_to_hfsql])
+}
+
+// ============== JWT REFRESH TOKENS ===============
+model RefreshToken {
+  id                  String  @id @default(cuid())
+
+  user_id             String
+  user                User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  token               String  @unique
+  expires_at          DateTime
+  created_at          DateTime @default(now())
+
+  @@index([user_id])
+  @@index([expires_at])
+}
+
+// ============== AUDIT LOG (Traçabilité) ===============
+model AuditLog {
+  id                  String  @id @default(cuid())
+
+  // Multi-tenancy
+  client_id           String
+  client              Client  @relation(fields: [client_id], references: [id], onDelete: Cascade)
+
+  // User action
+  user_id             String?
+  user                User?   @relation(fields: [user_id], references: [id], onDelete: SetNull)
+
+  // Action details
+  action              String  // CREATE, UPDATE, DELETE, APPROVE, REJECT, SYNC
+  resource            String  // HEURE, USER, CHANTIER, CLIENT
+  resource_id         String
+  changes             Json?   // { before: {...}, after: {...} }
+
+  timestamp           DateTime @default(now())
+
+  @@index([client_id])
+  @@index([user_id])
+  @@index([timestamp])
+  @@index([resource])
+}
